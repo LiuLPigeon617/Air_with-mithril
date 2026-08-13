@@ -357,11 +357,13 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     init_loadDefaultEnv();
     init_loadCustomEnv();
 
-    // 同步自上游 AngelAuraMC/Amethyst-iOS：刷新 JIT flags，决定是否需要 TXM workaround
+    // 同步自 catsruledogs：刷新 JIT flags，决定是否需要 Debug JIT Mapping
+    // 使用 DeviceNeedsDebugJITMapping() 基于 JIT_FLAG_IS_IOS_26 | JIT_FLAG_FORCE_MIRRORED
+    // 而非 TXM 固件检测，确保 iOS 26+ 无 TXM 设备也能正确设置 JIT 脚本
     DeviceGetJITFlags(YES);
-    BOOL requiresTXMWorkaround = DeviceHasJITFlags(JIT_FLAG_FORCE_MIRRORED | JIT_FLAG_HAS_TXM);
+    BOOL requiresDebugJITMapping = DeviceNeedsDebugJITMapping();
     BOOL jit26AlwaysAttached = getPrefBool(@"debug.debug_always_attached_jit");
-    if (requiresTXMWorkaround) {
+    if (requiresDebugJITMapping) {
         // 检测是否在使用 legacy JIT script（brk #0x69 由 UniversalJIT26.js 处理）
         static void *result;
         if(!result) result = JIT26CreateRegionLegacy(getpagesize());
@@ -391,7 +393,7 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
         task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS, 0, EXCEPTION_DEFAULT, MACHINE_THREAD_STATE);
     }
 
-    if (!requiresTXMWorkaround || jit26AlwaysAttached) {
+    if (!requiresDebugJITMapping || jit26AlwaysAttached) {
         if (jit26AlwaysAttached) {
             // Only allow StikDebug to catch our breakpoints to prevent any stutters
             task_set_exception_ports(mach_task_self(), EXC_MASK_ALL & ~EXC_MASK_BREAKPOINT, 0,
@@ -837,13 +839,15 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     //   → SIGILL（崩溃点落在 liblwjgl_stb 是因为 stb_truetype 字体光栅化是首个
     //   大量 JIT 的 native wrapper，与渲染器无关）。
     //
-    //   修复：统一显式设置为 256m（Java 17+ 默认值），对 Java 8/17/21/25 全部生效。
-    //   - InitialCodeCacheSize=32m 避免启动时立即触发 CodeCache 扩容（默认 2.25m
+    //   修复：统一显式设置为 64m（从 256m 降低），对 Java 8/17/21/25 全部生效。
+    //   - iOS 27 上 256m 的镜像映射可能导致 SIGBUS（调试器分配的 RX 内存在
+    //     大范围映射时可执行性不可靠），降低到 64m 减少映射范围
+    //   - InitialCodeCacheSize=16m 避免启动时立即触发 CodeCache 扩容（默认 2.25m
     //     会多次扩容，每次扩容都触发全局锁）
     //   - CodeCacheExpansionSize=4m 减少扩容次数（默认 64K 太小）
     //   - +UnlockExperimentalVMOptions 已在上一行启用，无需重复
-    PUSH_MARGV_LITERAL("-XX:ReservedCodeCacheSize=256m");
-    PUSH_MARGV_LITERAL("-XX:InitialCodeCacheSize=32m");
+    PUSH_MARGV_LITERAL("-XX:ReservedCodeCacheSize=64m");
+    PUSH_MARGV_LITERAL("-XX:InitialCodeCacheSize=16m");
     PUSH_MARGV_LITERAL("-XX:CodeCacheExpansionSize=4m");
 
     // On iOS 26, use mirror mapped JIT by default
